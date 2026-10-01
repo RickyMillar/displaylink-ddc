@@ -1,0 +1,1 @@
+SUBSYSTEM=="i2c-dev", ATTR{name}=="DisplayLink I2C Adapter", TAG+="uaccess"

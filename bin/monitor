@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Control an external monitor over DDC/CI through a DisplayLink dock.
+
+Usage:
+  monitor                       show brightness, contrast, RGB gain
+  monitor brightness [VALUE]    VALUE: 50, +10 or -10
+  monitor contrast|red|green|blue [VALUE]
+  monitor preset [6500k|9300k|user1|user2]
+  monitor mode [standard|mixed|movie|games]
+  monitor input [dp1|dp2|hdmi]
+  monitor power [on|standby|off]
+  monitor caps                  show the capabilities string of the monitor
+
+The named values for preset, mode and input come from one Samsung monitor.
+Run "monitor caps" to see the values your monitor supports. You can also
+give a raw value, for example "monitor input 0x11".
+"""
+import fcntl
+import glob
+import os
+import sys
+import time
+
+I2C_SLAVE = 0x0703
+DDC_ADDR = 0x37
+BUS_NAME = "DisplayLink I2C Adapter"
+
+FEATURES = {
+    "brightness": 0x10, "contrast": 0x12,
+    "red": 0x16, "green": 0x18, "blue": 0x1A,
+    "preset": 0x14, "mode": 0xDC, "input": 0x60, "power": 0xD6,
+}
+
+# Named values, from the capabilities string of this Samsung monitor.
+NAMED = {
+    "preset": {"6500k": 0x05, "9300k": 0x08, "user1": 0x0B, "user2": 0x0C},
+    "mode": {"standard": 0x00, "mixed": 0x02, "movie": 0x03, "games": 0x05},
+    "input": {"dp1": 0x0F, "dp2": 0x10, "hdmi": 0x12},
+    "power": {"on": 0x01, "standby": 0x04, "off": 0x05},
+}
+
+
+def find_bus():
+    for path in glob.glob("/sys/bus/i2c/devices/i2c-*/name"):
+        with open(path) as f:
+            if f.read().strip() == BUS_NAME:
+                return "/dev/" + path.split("/")[-2]
+    sys.exit(f"monitor: no '{BUS_NAME}' bus found. Is the dock connected?")
+
+
+def checksum(first, data):
+    chk = first
+    for b in data:
+        chk ^= b
+    return chk
+
+
+class Monitor:
+    def __init__(self, bus):
+        self.fd = os.open(bus, os.O_RDWR)
+        fcntl.ioctl(self.fd, I2C_SLAVE, DDC_ADDR)
+
+    def _send(self, payload):
+        msg = [0x51, 0x80 | len(payload)] + payload
+        os.write(self.fd, bytes(msg + [checksum(0x6E, msg)]))
+
+    def get(self, code, retries=3):
+        for _ in range(retries):
+            self._send([0x01, code])
+            time.sleep(0.05)
+            try:
+                r = os.read(self.fd, 11)
+            except OSError:
+                r = b""
+            if (len(r) == 11 and r[2] == 0x02 and r[3] == 0x00 and r[4] == code
+                    and checksum(0x50, r[:10]) == r[10]):
+                return (r[8] << 8) | r[9], (r[6] << 8) | r[7]
+            time.sleep(0.05)
+        sys.exit(f"monitor: no valid reply for feature 0x{code:02X}")
+
+    def capabilities(self):
+        out, offset, fails = b"", 0, 0
+        while fails < 5:
+            self._send([0xF3, offset >> 8, offset & 0xFF])
+            time.sleep(0.06)
+            try:
+                r = os.read(self.fd, 38)
+            except OSError:
+                r = b""
+            n = (r[1] & 0x7F) - 3 if len(r) > 5 else -1
+            if n < 0 or r[2] != 0xE3 or ((r[3] << 8) | r[4]) != offset:
+                fails += 1
+                time.sleep(0.1)
+                continue
+            if n == 0:
+                return out.decode(errors="replace")
+            out += r[5:5 + n]
+            offset += n
+        sys.exit("monitor: could not read the capabilities string")
+
+    def set(self, code, value):
+        self._send([0x03, code, value >> 8, value & 0xFF])
+        time.sleep(0.05)
+
+
+def resolve_value(arg, current, maximum):
+    """Turn a user argument ("50", "+10", "-10") into a new absolute value."""
+    try:
+        n = int(arg)
+    except ValueError:
+        sys.exit(f"monitor: bad value '{arg}'. Use 50, +10 or -10")
+    if arg[0] in "+-":
+        n += current
+    return max(0, min(maximum, n))
+
+
+def main(argv):
+    mon = Monitor(find_bus())
+
+    if not argv:
+        for name in ("brightness", "contrast", "red", "green", "blue"):
+            cur, mx = mon.get(FEATURES[name])
+            print(f"{name:<11} {cur}/{mx}")
+        return
+
+    name = argv[0]
+    if name == "caps":
+        print(mon.capabilities())
+        return
+    if name not in FEATURES:
+        sys.exit(__doc__)
+    code = FEATURES[name]
+
+    if name in NAMED:
+        names = NAMED[name]
+        if len(argv) == 1:
+            cur, _ = mon.get(code)
+            label = next((k for k, v in names.items() if v == cur), "unknown")
+            print(f"{name} 0x{cur:02X} ({label})  options: {', '.join(names)}")
+        else:
+            arg = argv[1].lower()
+            mon.set(code, names[arg] if arg in names else int(arg, 0))
+        return
+
+    cur, mx = mon.get(code)
+    if len(argv) == 1:
+        print(f"{name} {cur}/{mx}")
+        return
+    new = resolve_value(argv[1], cur, mx)
+    mon.set(code, new)
+    print(f"{name} {cur} -> {new}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
