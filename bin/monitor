@@ -207,42 +207,65 @@ See: https://github.com/RickyMillar/displaylink-ddc
     return args
 
 
-def main(argv):
-    mon = Monitor(find_bus())
+def command(bus, name=None, value=None):
+    mon = Monitor(bus)
 
-    if not argv:
+    if name == None:
         for name in ("brightness", "contrast", "red", "green", "blue"):
             cur, mx = mon.get(FEATURES[name])
             print(f"{name:<11} {cur}/{mx}")
         return
 
-    name = argv[0]
     if name == "caps":
         print(mon.capabilities())
         return
-    if name not in FEATURES:
-        sys.exit(__doc__)
+
     code = FEATURES[name]
 
     if name in NAMED:
         names = NAMED[name]
-        if len(argv) == 1:
+        if value == None:  # Command w/o value, print help.
             cur, _ = mon.get(code)
             label = next((k for k, v in names.items() if v == cur), "unknown")
             print(f"{name} 0x{cur:02X} ({label})  options: {', '.join(names)}")
         else:
-            arg = argv[1].lower()
+            arg = value.lower()
             mon.set(code, names[arg] if arg in names else int(arg, 0))
         return
 
     cur, mx = mon.get(code)
-    if len(argv) == 1:
+    if value == None:
         print(f"{name} {cur}/{mx}")
         return
-    new = resolve_value(argv[1], cur, mx)
+    new = resolve_value(value, cur, mx)
     mon.set(code, new)
     print(f"{name} {cur} -> {new}")
 
 
+def main():
+    args = parser()
+    print(args)
+
+    if args.command == "list":
+        list_monitors(do_print=True)
+        return
+
+    buses = [f"/dev/i2c-{idx}" for idx in args.devices]
+    if args.models != []:
+        monitors = list_monitors()
+        for model in args.models:
+            buses.append(monitors[model])
+    buses = list(set(buses))  # One call paer monitor.
+    if len(buses) == 0:
+        buses = [find_bus(do_all=False)]
+
+    for bus in buses:
+        try:
+            args.value
+        except AttributeError:
+            args.value = None
+        command(bus, args.command, args.value)
+
+
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()
