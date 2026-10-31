@@ -20,6 +20,7 @@ import glob
 import os
 import sys
 import time
+import argparse
 
 I2C_SLAVE = 0x0703
 DDC_ADDR = 0x37
@@ -39,14 +40,18 @@ NAMED = {
     "power": {"on": 0x01, "standby": 0x04, "off": 0x05},
 }
 
-
-def find_bus():
+def find_bus(do_all=False):
+    buses = []
     for path in glob.glob("/sys/bus/i2c/devices/i2c-*/name"):
         with open(path) as f:
             if f.read().strip() == BUS_NAME:
-                return "/dev/" + path.split("/")[-2]
-    sys.exit(f"monitor: no '{BUS_NAME}' bus found. Is the dock connected?")
-
+                buses.append("/dev/" + path.split("/")[-2])
+    if len(buses) == 0:
+        sys.exit(f"monitor: no '{BUS_NAME}' bus found. Is the dock connected?")
+    elif do_all:
+        return buses
+    else:
+        return buses[0]
 
 def checksum(first, data):
     chk = first
