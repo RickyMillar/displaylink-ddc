@@ -21,6 +21,7 @@ import os
 import sys
 import time
 import argparse
+from re import split as re_split
 
 I2C_SLAVE = 0x0703
 DDC_ADDR = 0x37
@@ -117,6 +118,25 @@ def resolve_value(arg, current, maximum):
     if arg[0] in "+-":
         n += current
     return max(0, min(maximum, n))
+
+
+# Get dict linking i2c device & model:
+# {"model":"/dev/i2c-n"}
+def list_monitors(do_print=False):
+    buses = find_bus(do_all=True)
+    mons = {}
+    for bus in buses:
+        mon = Monitor(bus)
+        caps = mon.capabilities()
+        caps = re_split(r"\(|\)", caps)
+        try:
+            model = caps[caps.index("model") + 1]
+            mons[model] = bus
+        except ValueError:
+            model = "No model found :("
+        if do_print:
+            print(f"{bus}\n{model}\n")
+    return mons
 
 
 def parser():
