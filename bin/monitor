@@ -244,7 +244,6 @@ def command(bus, name=None, value=None):
 
 def main():
     args = parser()
-    print(args)
 
     if args.command == "list":
         list_monitors(do_print=True)
