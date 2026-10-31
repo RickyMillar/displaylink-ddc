@@ -114,6 +114,74 @@ def resolve_value(arg, current, maximum):
     return max(0, min(maximum, n))
 
 
+def parser():
+    common_parser = argparse.ArgumentParser(add_help=False)
+    common_parser.add_argument(
+            '-m', '--models',
+            default=[],
+            nargs="+",
+            help='''
+            Model number of targeted monitor(s), see list.
+            Default is 1st monitor in /dev/i2c-*, alphabetical order.''')
+    common_parser.add_argument(
+            '-d', '--devices',
+            default=[],
+            type=int,
+            nargs="+",
+            help='''
+            i2c index of targeted monitor(s) (/dev/i2c-d), see list.
+            Default is 1st monitor in /dev/i2c-*, alphabetical order.''')
+
+    parser = argparse.ArgumentParser(
+            prog='monitors.py',
+            description='''
+            DDC/CI over displaylink.
+            No arguments prints the brightness, contrast & RGB gain''',
+            epilog='''
+The named values for preset, mode and input come from one Samsung monitor.
+Run "monitor caps" to see the values your monitor supports. You can also
+give a raw value, for example "monitor input 0x11".
+See: https://github.com/RickyMillar/displaylink-ddc
+            '''
+            )
+    subparsers = parser.add_subparsers(dest="command")
+
+    list_parser = subparsers.add_parser(
+            "list",
+            help="List i2c device and model for each monitor, for -m and -d")
+
+    caps_parser = subparsers.add_parser(
+            "caps", 
+            help="List the capabilities of the monitor",
+            parents=[common_parser])
+
+    # NAMED & FEATURES as args.
+    command_parsers = {}
+
+    values = ("brightness", "contrast", "red", "blue", "green")
+    for feature in FEATURES.keys():
+        command_parsers[feature] = subparsers.add_parser(
+                feature, parents=[common_parser])
+        if feature in values:
+            help_str='''Absolute or relative, eg: 50, +10 or -10'''
+        else:
+            help_str = ''
+        command_parsers[feature].add_argument(
+                "value", nargs="?", default=None, help=help_str, type=str)
+
+    for name, val in NAMED.items():
+        for action in command_parsers[name]._actions:
+            # Give raw value to input.
+            if action.dest == "value" and name != "input":
+                action.choices = list(val.keys())
+            elif action.dest == "value" and name == "input":
+                action.help = f'''{', '.join(NAMED[name].keys())} or raw value
+                (eg: input 0x11)'''
+
+    args = parser.parse_args()
+    return args
+
+
 def main(argv):
     mon = Monitor(find_bus())
 
