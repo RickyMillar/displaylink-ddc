@@ -20,6 +20,8 @@ import glob
 import os
 import sys
 import time
+import argparse
+from re import split as re_split
 
 I2C_SLAVE = 0x0703
 DDC_ADDR = 0x37
@@ -39,14 +41,18 @@ NAMED = {
     "power": {"on": 0x01, "standby": 0x04, "off": 0x05},
 }
 
-
-def find_bus():
+def find_bus(do_all=False):
+    buses = []
     for path in glob.glob("/sys/bus/i2c/devices/i2c-*/name"):
         with open(path) as f:
             if f.read().strip() == BUS_NAME:
-                return "/dev/" + path.split("/")[-2]
-    sys.exit(f"monitor: no '{BUS_NAME}' bus found. Is the dock connected?")
-
+                buses.append("/dev/" + path.split("/")[-2])
+    if len(buses) == 0:
+        sys.exit(f"monitor: no '{BUS_NAME}' bus found. Is the dock connected?")
+    elif do_all:
+        return buses
+    else:
+        return buses[0]
 
 def checksum(first, data):
     chk = first
@@ -114,42 +120,151 @@ def resolve_value(arg, current, maximum):
     return max(0, min(maximum, n))
 
 
-def main(argv):
-    mon = Monitor(find_bus())
+# Get dict linking i2c device & model:
+# {"model":"/dev/i2c-n"}
+def list_monitors(do_print=False):
+    buses = find_bus(do_all=True)
+    mons = {}
+    for bus in buses:
+        mon = Monitor(bus)
+        caps = mon.capabilities()
+        caps = re_split(r"\(|\)", caps)
+        try:
+            model = caps[caps.index("model") + 1]
+            mons[model] = bus
+        except ValueError:
+            model = "No model found :("
+        if do_print:
+            print(f"{bus}\n{model}\n")
+    return mons
 
-    if not argv:
+
+def parser():
+    common_parser = argparse.ArgumentParser(add_help=False)
+    common_parser.add_argument(
+            '-m', '--models',
+            default=[],
+            nargs="+",
+            help='''
+            Model number of targeted monitor(s), see list.
+            Default is 1st monitor in /dev/i2c-*, alphabetical order.''')
+    common_parser.add_argument(
+            '-d', '--devices',
+            default=[],
+            type=int,
+            nargs="+",
+            help='''
+            i2c index of targeted monitor(s) (/dev/i2c-d), see list.
+            Default is 1st monitor in /dev/i2c-*, alphabetical order.''')
+
+    parser = argparse.ArgumentParser(
+            prog='monitors.py',
+            description='''
+            DDC/CI over displaylink.
+            No arguments prints the brightness, contrast & RGB gain''',
+            epilog='''
+The named values for preset, mode and input come from one Samsung monitor.
+Run "monitor caps" to see the values your monitor supports. You can also
+give a raw value, for example "monitor input 0x11".
+See: https://github.com/RickyMillar/displaylink-ddc
+            '''
+            )
+    subparsers = parser.add_subparsers(dest="command")
+
+    list_parser = subparsers.add_parser(
+            "list",
+            help="List i2c device and model for each monitor, for -m and -d")
+
+    caps_parser = subparsers.add_parser(
+            "caps", 
+            help="List the capabilities of the monitor",
+            parents=[common_parser])
+
+    # NAMED & FEATURES as args.
+    command_parsers = {}
+
+    values = ("brightness", "contrast", "red", "blue", "green")
+    for feature in FEATURES.keys():
+        command_parsers[feature] = subparsers.add_parser(
+                feature, parents=[common_parser])
+        if feature in values:
+            help_str='''Absolute or relative, eg: 50, +10 or -10'''
+        else:
+            help_str = ''
+        command_parsers[feature].add_argument(
+                "value", nargs="?", default=None, help=help_str, type=str)
+
+    for name, val in NAMED.items():
+        for action in command_parsers[name]._actions:
+            # Give raw value to input.
+            if action.dest == "value" and name != "input":
+                action.choices = list(val.keys())
+            elif action.dest == "value" and name == "input":
+                action.help = f'''{', '.join(NAMED[name].keys())} or raw value
+                (eg: input 0x11)'''
+
+    args = parser.parse_args()
+    return args
+
+
+def command(bus, name=None, value=None):
+    mon = Monitor(bus)
+
+    if name == None:
         for name in ("brightness", "contrast", "red", "green", "blue"):
             cur, mx = mon.get(FEATURES[name])
             print(f"{name:<11} {cur}/{mx}")
         return
 
-    name = argv[0]
     if name == "caps":
         print(mon.capabilities())
         return
-    if name not in FEATURES:
-        sys.exit(__doc__)
+
     code = FEATURES[name]
 
     if name in NAMED:
         names = NAMED[name]
-        if len(argv) == 1:
+        if value == None:  # Command w/o value, print help.
             cur, _ = mon.get(code)
             label = next((k for k, v in names.items() if v == cur), "unknown")
             print(f"{name} 0x{cur:02X} ({label})  options: {', '.join(names)}")
         else:
-            arg = argv[1].lower()
+            arg = value.lower()
             mon.set(code, names[arg] if arg in names else int(arg, 0))
         return
 
     cur, mx = mon.get(code)
-    if len(argv) == 1:
+    if value == None:
         print(f"{name} {cur}/{mx}")
         return
-    new = resolve_value(argv[1], cur, mx)
+    new = resolve_value(value, cur, mx)
     mon.set(code, new)
     print(f"{name} {cur} -> {new}")
 
 
+def main():
+    args = parser()
+
+    if args.command == "list":
+        list_monitors(do_print=True)
+        return
+
+    buses = [f"/dev/i2c-{idx}" for idx in args.devices]
+    if args.models != []:
+        monitors = list_monitors()
+        for model in args.models:
+            buses.append(monitors[model])
+    buses = list(set(buses))  # One call paer monitor.
+    if len(buses) == 0:
+        buses = [find_bus(do_all=False)]
+
+    for bus in buses:
+        try:
+            args.value
+        except AttributeError:
+            args.value = None
+        command(bus, args.command, args.value)
+
+
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()
